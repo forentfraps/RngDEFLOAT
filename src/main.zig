@@ -58,162 +58,163 @@ const EncryptEntryFactory = struct {
     }
 
     pub fn custom(file_index: type, table_index: type, sequence_len: type) type {
-        const EncryptEntry = struct {
+        return struct {
             file_index: file_index,
             table_index: table_index,
             sequence_len: sequence_len,
         };
-        return EncryptEntry;
     }
 };
 
 const EncryptEntryList = MultiArrayList(EncryptEntry_default);
 
-const LookupPrefixTree = struct {
-    raw_data: [*]u8,
-    raw_size: usize,
-    allocator: std.mem.Allocator,
-    sequence_len: usize = 256,
-    profit_len: usize = 4,
-    root_node: *TrieNode = undefined,
-    EncryptEntry: type,
-    encryted_seq_list: *anyopaque = undefined,
-    compressed_len: isize,
-
-    pub fn build(
+pub fn LookupPrefixTree(comptime EncryptEntry_type: type) type {
+    return struct {
+        raw_data: [*]u8,
+        raw_size: usize,
         allocator: std.mem.Allocator,
-        table_data: []u8,
-        enc_list: *EncryptEntryList,
-        sequence_len: usize,
-        comptime EncryptEntry: type,
-    ) !@This() {
-        var LPT = LookupPrefixTree{
-            .raw_data = table_data.ptr,
-            .raw_size = table_data.len,
-            .allocator = allocator,
-            .sequence_len = sequence_len,
-            .profit_len = @sizeOf(EncryptEntry.table_index),
-            .compressed_len = table_data.len,
-        };
-        LPT.root_node = try TrieNode.init(allocator, 0);
-        LPT.encryted_seq_list = enc_list;
-        for (table_data, 0..) |byte_value, index| {
-            try (&LPT).resolve_byte_value(
-                LPT.root_node,
-                byte_value,
-                index,
-                @min(LPT.sequence_len, LPT.raw_size - index),
-            );
-        }
-        return LPT;
-    }
+        sequence_len: usize = 256,
+        profit_len: usize = 4,
+        root_node: *TrieNode = undefined,
+        encryted_seq_list: *MultiArrayList(EncryptEntry_type) = undefined,
+        DummyEncryptEntry: *anyopaque = undefined,
+        compressed_len: isize,
+        const Self = @This();
 
-    pub fn resolve_byte_value(
-        self: *@This(),
-        local_root_node: *TrieNode,
-        byte_value: u8,
-        byte_index: usize,
-        depth: usize,
-    ) !void {
-        if (depth == 0) {
-            return;
+        pub fn init(allocator: std.mem.Allocator, table_data: []u8, enc_list: *MultiArrayList(EncryptEntry_type), sequence_len: usize) !Self {
+            var LPT = Self{
+                .raw_data = table_data.ptr,
+                .raw_size = table_data.len,
+                .allocator = allocator,
+                .sequence_len = sequence_len,
+                .profit_len = @sizeOf(@typeInfo(EncryptEntry_type).@"struct".fields[2].type) + @sizeOf(@typeInfo(EncryptEntry_type).@"struct".fields[1].type),
+                .compressed_len = @as(isize, @intCast(table_data.len)),
+                .encryted_seq_list = enc_list,
+            };
+
+            LPT.root_node = try TrieNode.init(allocator, 0);
+            for (table_data, 0..) |byte_value, index| {
+                try (&LPT).resolve_byte_value(
+                    LPT.root_node,
+                    byte_value,
+                    index,
+                    @min(LPT.sequence_len, LPT.raw_size - index),
+                );
+            }
+
+            // Init other parameters as needed, like root_node, raw_data, etc.
+
+            return LPT;
         }
 
-        if (local_root_node.contains(byte_value)) {
-            return self.resolve_byte_value(
-                local_root_node.get(byte_value),
-                self.raw_data[byte_index + 1],
-                byte_index + 1,
-                depth - 1,
-            );
-        } else {
-            var new_node = try TrieNode.init(self.allocator, byte_index);
+        pub fn resolve_byte_value(
+            self: *@This(),
+            local_root_node: *TrieNode,
+            byte_value: u8,
+            byte_index: usize,
+            depth: usize,
+        ) !void {
+            if (depth == 0) {
+                return;
+            }
 
-            new_node.table_index = byte_index;
-            try local_root_node.put(byte_value, new_node);
-            return self.resolve_byte_value(
-                new_node,
-                self.raw_data[byte_index + 1],
-                byte_index + 1,
-                depth - 1,
-            );
-        }
-    }
-
-    pub fn match_seq_range(self: *@This(), seq_range: []u8, file_offset: usize) !void {
-        //std.debug.print("msr called\n", .{});
-        var i: usize = 0;
-        while (i < (seq_range.len - self.sequence_len)) {
-            const local_seq = seq_range[i .. self.sequence_len + i];
-            var table_index: usize = 0;
-            const found_seq_len = self.check_seq(local_seq, self.root_node, 0, &table_index);
-            if (found_seq_len > self.profit_len) {
-                try @constCast(self.encryted_seq_list).append(.{
-                    .file_index = @as(@Type(self.EncryptEntry.file_index), @intCast(file_offset + i)),
-                    .table_index = @as(@Type(self.EncryptEntry.table_index), @intCast(table_index)),
-                    .sequence_len = @as(@Type(self.EncryptEntry.sequence_len), @intCast(found_seq_len)),
-                });
-                i += found_seq_len;
+            if (local_root_node.contains(byte_value)) {
+                return self.resolve_byte_value(
+                    local_root_node.get(byte_value),
+                    self.raw_data[byte_index + 1],
+                    byte_index + 1,
+                    depth - 1,
+                );
             } else {
-                i += 1;
+                var new_node = try TrieNode.init(self.allocator, byte_index);
+
+                new_node.table_index = byte_index;
+                try local_root_node.put(byte_value, new_node);
+                return self.resolve_byte_value(
+                    new_node,
+                    self.raw_data[byte_index + 1],
+                    byte_index + 1,
+                    depth - 1,
+                );
             }
         }
-    }
 
-    pub fn check_seq(self: *@This(), seq: []u8, node: *TrieNode, cur_len: usize, table_index: *usize) usize {
-        //std.debug.print("cs called, curlen {d} seqlen {d}\n", .{ cur_len, seq.len });
-        if (node.contains(seq[0])) {
-            if (seq.len == 1) {
-                table_index.* = node.table_index - self.sequence_len;
-                return self.sequence_len;
+        pub fn match_seq_range(self: *@This(), seq_range: []u8, file_offset: usize) !void {
+            //std.debug.print("msr called\n", .{});
+            var i: usize = 0;
+            while (i < (seq_range.len - self.sequence_len)) {
+                const local_seq = seq_range[i .. self.sequence_len + i];
+                var table_index: usize = 0;
+                const found_seq_len = self.check_seq(local_seq, self.root_node, 0, &table_index);
+                if (found_seq_len > self.profit_len) {
+                    try @constCast(self.encryted_seq_list).append(.{
+                        .file_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[0].type, @intCast(file_offset + i)),
+                        .table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index)),
+                        .sequence_len = @as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)),
+                    });
+                    self.compressed_len += @as(isize, @intCast(self.profit_len));
+                    i += found_seq_len;
+                } else {
+                    self.compressed_len += 1;
+                    i += 1;
+                }
+            }
+        }
+
+        pub fn check_seq(self: *@This(), seq: []u8, node: *TrieNode, cur_len: usize, table_index: *usize) usize {
+            //std.debug.print("cs called, curlen {d} seqlen {d}\n", .{ cur_len, seq.len });
+            if (node.contains(seq[0])) {
+                if (seq.len == 1) {
+                    table_index.* = node.table_index - self.sequence_len;
+                    return self.sequence_len;
+                } else {
+                    return self.check_seq(seq[1..], node.get(seq[0]), cur_len + 1, table_index);
+                }
             } else {
-                return self.check_seq(seq[1..], node.get(seq[0]), cur_len + 1, table_index);
+                if (cur_len > 0) {
+                    table_index.* = node.table_index + 1 - cur_len;
+                }
+                return cur_len;
             }
-        } else {
-            if (cur_len > 0) {
-                table_index.* = node.table_index + 1 - cur_len;
+        }
+
+        pub fn testcompress(self: *@This(), size: usize) !void {
+            self.compressed_len = 0;
+            self.encryted_seq_list.clearRetainingCapacity();
+            const block_count = size / self.sequence_len;
+            var seed: [32]u8 = undefined;
+            HealthySeed(seed[0..].ptr, 32);
+            var csprng = std.Random.ChaCha.init(seed);
+            const test_alloc = std.heap.page_allocator;
+
+            var buffer: [*]u8 = (try test_alloc.alloc(u8, 2 * self.sequence_len)).ptr;
+            csprng.fill(buffer[0..self.sequence_len]);
+
+            std.debug.print("starting to test compress\n", .{});
+            for (0..block_count) |i| {
+                try self.match_seq_range(buffer[0 .. 2 * self.sequence_len], self.sequence_len * i);
+                @memcpy(buffer[0..self.sequence_len], buffer[self.sequence_len .. self.sequence_len * 2]);
+                csprng.fill(buffer[self.sequence_len .. self.sequence_len * 2]);
             }
-            return cur_len;
+            std.debug.print("finished test compress\n", .{});
+            std.debug.print("compressed other way {d} -> {d} \n", .{ self.raw_size, self.compressed_len });
+            std.debug.print("ratio {}\n", .{self.calc_efficiency(size)});
+            test_alloc.free(buffer[0 .. 2 * self.sequence_len]);
         }
-    }
 
-    pub fn testcompress(self: *@This(), size: usize) !void {
-        self.compressed_len = 0;
-        self.encryted_seq_list.clearRetainingCapacity();
-        const block_count = size / self.sequence_len;
-        var seed: [32]u8 = undefined;
-        HealthySeed(seed[0..].ptr, 32);
-        var csprng = std.Random.ChaCha.init(seed);
-        const test_alloc = std.heap.page_allocator;
-
-        var buffer: [*]u8 = (try test_alloc.alloc(u8, 2 * self.sequence_len)).ptr;
-        csprng.fill(buffer[0..self.sequence_len]);
-
-        std.debug.print("starting to test compress\n", .{});
-        for (0..block_count) |i| {
-            try self.match_seq_range(buffer[0 .. 2 * self.sequence_len], self.sequence_len * i);
-            @memcpy(buffer[0..self.sequence_len], buffer[self.sequence_len .. self.sequence_len * 2]);
-            csprng.fill(buffer[self.sequence_len .. self.sequence_len * 2]);
+        pub fn calc_efficiency(self: @This(), data_size: usize) f32 {
+            std.debug.print("this is called\n", .{});
+            var saved_bytes: usize = 0;
+            for (self.encryted_seq_list.items) |entry| {
+                saved_bytes += entry.sequence_len - self.profit_len;
+            }
+            std.debug.print("Saved {d} bytes \n", .{saved_bytes});
+            const sf: f32 = @floatFromInt(saved_bytes);
+            const dsf: f32 = @floatFromInt(data_size);
+            return sf / dsf * 100.0;
         }
-        std.debug.print("finished test compress\n", .{});
-        std.debug.print("compressed other way {d} -> {d} \n", .{ self.raw_size, @as(isize, @intCast(self.raw_size)) - self.compressed_len });
-        std.debug.print("ratio {}\n", .{self.calc_efficiency(size)});
-        test_alloc.free(buffer[0 .. 2 * self.sequence_len]);
-    }
-
-    pub fn calc_efficiency(self: @This(), data_size: usize) f32 {
-        std.debug.print("this is called\n", .{});
-        var saved_bytes: usize = 0;
-        for (self.encryted_seq_list.items, 0..) |entry, i| {
-            std.debug.print("entry {d}\n", .{i});
-            saved_bytes += entry.sequence_len - self.profit_len;
-        }
-        std.debug.print("Saved {d} bytes \n", .{saved_bytes});
-        const sf: f32 = @floatFromInt(saved_bytes);
-        const dsf: f32 = @floatFromInt(data_size);
-        return sf / dsf * 100.0;
-    }
-};
+    };
+}
 
 fn initRandomTable(allocator: std.mem.Allocator, seed: [32]u8, size: usize) ![*]u8 {
     var csprng = std.Random.ChaCha.init(seed);
@@ -236,7 +237,7 @@ pub fn main() !void {
     std.debug.print("building the trie tree\n", .{});
     const EncryptEntry_type: type = comptime EncryptEntryFactory.custom(u32, u16, u4);
     var enc_list = MultiArrayList(EncryptEntry_type).init(allocator);
-    var LPT = try LookupPrefixTree.build(allocator, table[0 .. 1 << 16], &enc_list, 16, EncryptEntry_type);
+    var LPT = try LookupPrefixTree(EncryptEntry_type).init(allocator, table[0 .. 1 << 16], &enc_list, 16);
     std.debug.print("starting to compress\n", .{});
     for (0..128) |_| {
         try (&LPT).testcompress(1 << 24);
