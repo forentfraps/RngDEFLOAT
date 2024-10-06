@@ -155,6 +155,16 @@ const EncryptEntryFactory = struct {
     }
 };
 
+pub fn ULEB64_bitsize(n: usize) usize {
+    var result: usize = 4;
+    var arg = n >> 3;
+    while (arg > 0) {
+        result += 4;
+        arg = arg >> 3;
+    }
+    return result;
+}
+
 pub fn ULEB128_bitsize(n: usize) usize {
     var result: usize = 8;
     var arg = n >> 7;
@@ -256,8 +266,9 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                         .sequence_len = @as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)),
                     });
                     self.compressed_len -= found_seq_len;
-                    self.control_bitstream_len += 1 + ULEB128_bitsize(self.global_block_counter) + 1 + 3 + ULEB128_bitsize(table_index);
+                    //self.control_bitstream_len += 1 + ULEB128_bitsize(self.global_block_counter) + 1 + 3 + ULEB128_bitsize(table_index);
                     //                      control_bit | literal_block len      |      control_bit | len | offset
+                    self.control_bitstream_len += 3 + ULEB64_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index);
 
                     self.global_block_counter = 0;
                     i += found_seq_len;
@@ -290,18 +301,29 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             try self.match_seq_range(buffer, 0);
             self.control_bitstream_len += 1 + ULEB128_bitsize(self.global_block_counter);
             const saved_bitstream_bytes: isize = @as(isize, @intCast(self.raw_size)) - @as(isize, @intCast(self.compressed_len + (self.control_bitstream_len / 8)));
-            if (self.encryted_seq_list.items.len > self.max_found_seq) {
-                self.max_found_seq = self.encryted_seq_list.items.len;
+            if (self.encryted_seq_list.items.len == self.max_found_seq and self.max_save_bytes < saved_bitstream_bytes) {
                 self.max_save_bytes = saved_bitstream_bytes;
+                std.debug.print("[*]\\{d} Control BitStream Format => {d} | total_seq => {d} || Maximum so far -> {d} | {d}\n", .{
+                    iteration,
+                    saved_bitstream_bytes,
+                    self.encryted_seq_list.items.len,
+                    self.max_save_bytes,
+                    self.max_found_seq,
+                });
+            } else if (self.encryted_seq_list.items.len > self.max_found_seq) {
+                self.max_save_bytes = saved_bitstream_bytes;
+                self.max_found_seq = self.encryted_seq_list.items.len;
+                std.debug.print("[*]\\{d} Control BitStream Format => {d} | total_seq => {d} || Maximum so far -> {d} | {d}\n", .{
+                    iteration,
+                    saved_bitstream_bytes,
+                    self.encryted_seq_list.items.len,
+                    self.max_save_bytes,
+                    self.max_found_seq,
+                });
             }
+
             //if (saved_bitstream_bytes > 0) {
-            std.debug.print("[*]\\{d} Control BitStream Format => {d} | total_seq => {d} || Maximum so far -> {d} | {d}\n", .{
-                iteration,
-                saved_bitstream_bytes,
-                self.encryted_seq_list.items.len,
-                self.max_save_bytes,
-                self.max_found_seq,
-            });
+
             //}
 
             //return (saved_sequence_bytes > header_size) or (saved_table_bytes > header_size);
@@ -341,10 +363,10 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
 }
 
 fn attemptFileCompress(filename: []const u8) !void {
-    const table_size = 24;
+    const table_size = 16;
     const sequence_len = 8;
     const header_size = 32 + 1;
-    const EncryptEntry_type: type = EncryptEntryFactory.custom(u20, u20, u4);
+    const EncryptEntry_type: type = EncryptEntryFactory.custom(u20, u16, u3);
 
     var input_file = try std.fs.cwd().openFile(filename, .{});
     const size = (try input_file.metadata()).size();
@@ -357,19 +379,18 @@ fn attemptFileCompress(filename: []const u8) !void {
     std.debug.print("[P] building the trie tree\n", .{});
 
     var enc_list = MultiArrayList(EncryptEntry_type).init(allocator);
-    var LPT = try LookupPrefixTree(EncryptEntry_type, TrieNode_HM).init(allocator, buffer[0..size], &enc_list, sequence_len, 4);
+    var LPT = try LookupPrefixTree(EncryptEntry_type, TrieNode_HM).init(allocator, buffer[0..size], &enc_list, sequence_len, 2);
     std.debug.print("[P] trie built\n", .{});
     var i: u128 = 0;
+    var table: []u8 = try allocator.alloc(u8, 1 << table_size);
     while (true) {
+        initRandomTable(seed, table[0..].ptr, 1 << table_size);
         i += 1;
         HealthySeed(seed[0..].ptr, 32);
-        var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        const tmp_allocator = tmp_arena.allocator();
         //std.debug.print("[P] building the random table\n", .{});
-        const table = try initRandomTable(tmp_allocator, seed, 1 << table_size);
 
         //std.debug.print("[P] starting to compress \n", .{});
-        const valid_seed = try (&LPT).testcompress(table[0 .. 1 << table_size], header_size, i);
+        const valid_seed = try (&LPT).testcompress(table, header_size, i);
         if (valid_seed) {
             std.debug.print("VALID SEED FOUND!!!\n", .{});
             std.debug.print("[SEED] {any}\n", .{seed});
@@ -378,15 +399,13 @@ fn attemptFileCompress(filename: []const u8) !void {
             return;
         }
         LPT.reset();
-        tmp_arena.deinit();
     }
 }
 
-fn initRandomTable(allocator: std.mem.Allocator, seed: [32]u8, size: usize) ![*]u8 {
+fn initRandomTable(seed: [32]u8, buf: [*]u8, size: usize) void {
     var csprng = std.Random.ChaCha.init(seed);
-    const table = try allocator.alloc(u8, size);
-    csprng.fill(table);
-    return table.ptr;
+    csprng.fill(buf[0..size]);
+    return;
 }
 
 pub fn main() !void {
