@@ -11,6 +11,9 @@ const TrieNode_HM = Tries.TrieNode_HM;
 const TrieNode_AR = Tries.TrieNode_AR;
 const TrieNode_LIN_AR = Tries.TrieNode_LIN_AR;
 
+const bs = @import("bitstream.zig");
+const BitStream = bs.BitStream;
+
 const EncryptEntry_default = struct {
     file_index: u32,
     table_index: u16,
@@ -67,6 +70,8 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
         control_bitstream_len: usize = 0,
         max_length_sequence: usize = 0,
         max_save_bytes: isize = 0,
+        bitstream: BitStream(),
+
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, table_data: []u8, enc_list: *MultiArrayList(EncryptEntry_type), sequence_len: usize, profit_len: usize) !Self {
@@ -79,6 +84,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                 .profit_len = profit_len,
                 .compressed_len = table_data.len,
                 .encrypted_entry_list = enc_list,
+                .bitstream = BitStream().init(allocator),
             };
 
             LPT.root_node = try TrieNode.init(allocator, 0);
@@ -129,7 +135,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
         }
 
         pub fn match_seq_range(self: *@This(), seq_range: []const u8, file_offset: usize) !void {
-            // Attempts to matcha given range to a built trie
+            // Attempts to match a given range to a built trie
 
             var i: usize = 0;
             while (i < (seq_range.len - self.sequence_len)) {
