@@ -148,7 +148,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                 var table_index: usize = 0;
                 const found_seq_len = self.check_seq(local_seq, self.root_node, 0, &table_index);
                 const cast_table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index));
-                if (1 + found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(cast_table_index)) / 8) {
+                if (found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index)) / 8) {
                     try @constCast(self.encrypted_entry_list).append(.{
                         .file_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[0].type, @intCast(file_offset + i)),
                         .table_index = cast_table_index,
@@ -198,7 +198,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             try self.match_seq_range(buffer, 0);
             const saved_bitstream_bytes: isize = @as(isize, @intCast(self.raw_size)) - @as(
                 isize,
-                @intCast(self.compressed_len + self.bitstream.byte_ptr + ULEB128_bitsize(self.bitstream.byte_ptr)),
+                @intCast(self.compressed_len + self.bitstream.byte_ptr + ULEB128_bitsize(self.bitstream.byte_ptr) / 8),
             );
             if (self.encrypted_entry_list.items.len == self.max_length_sequence and self.max_save_bytes < saved_bitstream_bytes) {
                 self.max_save_bytes = saved_bitstream_bytes;
@@ -216,7 +216,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                     self.max_length_sequence,
                 });
             }
-            return saved_bitstream_bytes + 1700 > header_size;
+            return saved_bitstream_bytes > header_size;
         }
 
         pub fn calc_efficiency(self: @This()) isize {
@@ -227,7 +227,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             }
             return total_bytes;
         }
-        pub fn writeCompressed(self: @This(), original_file: [*]const u8, seed: [32]u8) !void {
+        pub fn writeCompressed(self: @This(), original_file: [*]const u8, original_size: usize, seed: [32]u8) !void {
             _ = try std.fs.cwd().createFile("output.enc", .{});
             var output_file = try std.fs.cwd().openFile("output.enc", .{ .mode = .write_only });
             // seed
@@ -243,9 +243,11 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             //literal run
             var file_ptr: usize = 0;
             for (self.encrypted_entry_list.items) |entry| {
-                _ = try output_file.write(original_file[file_ptr..@as(usize, @intCast(entry.file_index))]);
-                file_ptr += entry.sequence_len;
+                std.debug.print("{d} -> {d}\n", .{ file_ptr, entry.file_index });
+                _ = try output_file.write(original_file[file_ptr..entry.file_index]);
+                file_ptr = entry.file_index + entry.sequence_len;
             }
+            _ = try output_file.write(original_file[file_ptr..original_size]);
             output_file.close();
         }
         pub fn reset(self: *@This()) void {
@@ -261,7 +263,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
 fn attemptFileCompress(filename: []const u8) !void {
     const table_size = 20;
     const sequence_len = 8;
-    const header_size = 32 + 4;
+    const header_size = 32;
     const EncryptEntry_type: type = EncryptEntryFactory.custom(u20, u16, u4);
 
     var input_file = try std.fs.cwd().openFile(filename, .{});
@@ -299,7 +301,7 @@ fn attemptFileCompress(filename: []const u8) !void {
             std.debug.print("VALID SEED FOUND!!!\n", .{});
             std.debug.print("[SEED] {any}\n", .{seed});
 
-            try LPT.writeCompressed(buffer, seed);
+            try LPT.writeCompressed(buffer, size, seed);
             return;
         }
         LPT.reset();
@@ -313,5 +315,5 @@ fn initRandomTable(seed: [32]u8, buf: [*]u8, size: usize) void {
 }
 
 pub fn main() !void {
-    try attemptFileCompress("output.rar");
+    try attemptFileCompress("RandomData.bin");
 }
