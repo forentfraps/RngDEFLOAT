@@ -15,9 +15,9 @@ const bs = @import("bitstream.zig");
 const BitStream = bs.BitStream;
 
 const EncryptEntry_default = struct {
-    file_index: u32,
-    table_index: u16,
-    sequence_len: u4,
+    file_index: usize,
+    table_index: usize,
+    sequence_len: usize,
 };
 
 const EncryptEntryFactory = struct {
@@ -102,8 +102,6 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                 );
             }
 
-            // Init other parameters as needed, like root_node, raw_data, etc.
-
             return LPT;
         }
 
@@ -147,11 +145,10 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                 const local_seq = seq_range[i .. self.sequence_len + i];
                 var table_index: usize = 0;
                 const found_seq_len = self.check_seq(local_seq, self.root_node, 0, &table_index);
-                const cast_table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index));
-                if (found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index)) / 8) {
+                if (found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(file_offset + i)) / 8) {
                     try @constCast(self.encrypted_entry_list).append(.{
-                        .file_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[0].type, @intCast(file_offset + i)),
-                        .table_index = cast_table_index,
+                        .file_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[0].type, @intCast(self.global_block_counter)),
+                        .table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(file_offset + i)),
                         .sequence_len = @as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)),
                     });
                     self.compressed_len -= found_seq_len;
@@ -161,7 +158,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                     //self.control_bitstream_len += 3 + ULEB64_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index);
                     try self.bitstream.pushFixedSize(@as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)));
                     try self.bitstream.pushULEB128(self.global_block_counter);
-                    try self.bitstream.pushULEB128(@as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index)));
+                    try self.bitstream.pushULEB128(@as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(file_offset + i)));
 
                     self.global_block_counter = 0;
                     i += found_seq_len;
@@ -172,26 +169,26 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             }
         }
 
-        fn check_seq(self: *@This(), seq: []const u8, node: *TrieNode, cur_len: usize, table_index: *usize) usize {
+        fn check_seq(self: *@This(), seq: []const u8, node: *TrieNode, cur_len: usize, file_index: *usize) usize {
             // Check the sequence provided by match_seq_range for presence in a built trie.
 
             //std.debug.print("cs called, curlen {d} seqlen {d}\n", .{ cur_len, seq.len });
             if (node.get(seq[0])) |child_node| {
                 if (seq.len == 1) {
-                    table_index.* = node.table_index + 1 - cur_len;
+                    file_index.* = node.table_index + 1 - cur_len;
                     return cur_len;
                 } else {
-                    return self.check_seq(seq[1..], child_node, cur_len + 1, table_index);
+                    return self.check_seq(seq[1..], child_node, cur_len + 1, file_index);
                 }
             } else {
                 if (cur_len > 0) {
-                    table_index.* = node.table_index + 1 - cur_len;
+                    file_index.* = node.table_index + 1 - cur_len;
                 }
                 return cur_len;
             }
         }
 
-        pub fn testcompress(self: *@This(), buffer: []const u8, header_size: usize, iteration: u128) !bool {
+        pub fn testcompress(self: *@This(), buffer: []const u8, _: usize, iteration: u128) !bool {
             // Tries to compress data and checks whether it was successful
 
             //std.debug.print("\n[T] starting to compress\n", .{});
@@ -216,7 +213,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                     self.max_length_sequence,
                 });
             }
-            return saved_bitstream_bytes > header_size;
+            return saved_bitstream_bytes >= 3;
         }
 
         pub fn calc_efficiency(self: @This()) isize {
@@ -227,9 +224,15 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             }
             return total_bytes;
         }
-        pub fn writeCompressed(self: @This(), original_file: [*]const u8, original_size: usize, seed: [32]u8) !void {
-            _ = try std.fs.cwd().createFile("output.enc", .{});
-            var output_file = try std.fs.cwd().openFile("output.enc", .{ .mode = .write_only });
+        pub fn writeCompressed(
+            self: @This(),
+            original_file: [*]const u8,
+            original_size: usize,
+            seed: [32]u8,
+            output_filename: []const u8,
+        ) !void {
+            _ = try std.fs.cwd().createFile(output_filename, .{});
+            var output_file = try std.fs.cwd().openFile(output_filename, .{ .mode = .write_only });
             // seed
             _ = try output_file.write(seed[0..32]);
             var tmp_bitstream = try BitStream().init(std.heap.page_allocator);
@@ -243,9 +246,9 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             //literal run
             var file_ptr: usize = 0;
             for (self.encrypted_entry_list.items) |entry| {
-                std.debug.print("{d} -> {d}\n", .{ file_ptr, entry.file_index });
-                _ = try output_file.write(original_file[file_ptr..entry.file_index]);
-                file_ptr = entry.file_index + entry.sequence_len;
+                std.debug.print("{d} -> {d}\n", .{ file_ptr, file_ptr + entry.file_index });
+                _ = try output_file.write(original_file[file_ptr .. file_ptr + entry.file_index]);
+                file_ptr = file_ptr + entry.file_index + entry.sequence_len;
             }
             _ = try output_file.write(original_file[file_ptr..original_size]);
             output_file.close();
@@ -260,8 +263,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
     };
 }
 
-fn attemptFileCompress(filename: []const u8) !void {
-    const table_size = 20;
+fn compress(filename: []const u8, output_filename: []const u8, table_size: usize) !void {
     const sequence_len = 8;
     const header_size = 32;
     const EncryptEntry_type: type = EncryptEntryFactory.custom(u20, u16, u4);
@@ -288,9 +290,9 @@ fn attemptFileCompress(filename: []const u8) !void {
 
     std.debug.print("[P] trie built\n", .{});
     var i: u128 = 0;
-    var table: []u8 = try allocator.alloc(u8, 1 << table_size);
+    var table: []u8 = try allocator.alloc(u8, table_size);
     while (true) {
-        initRandomTable(seed, table[0..].ptr, 1 << table_size);
+        initRandomTable(seed, table[0..].ptr, table_size);
         i += 1;
         HealthySeed(seed[0..].ptr, 32);
         //std.debug.print("[P] building the random table\n", .{});
@@ -301,11 +303,70 @@ fn attemptFileCompress(filename: []const u8) !void {
             std.debug.print("VALID SEED FOUND!!!\n", .{});
             std.debug.print("[SEED] {any}\n", .{seed});
 
-            try LPT.writeCompressed(buffer, size, seed);
+            try LPT.writeCompressed(buffer, size, seed, output_filename);
             return;
         }
         LPT.reset();
     }
+}
+
+pub fn decompress(filename: []const u8, output_filename: []const u8, table_size: usize) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var input_file = try std.fs.cwd().openFile(filename, .{});
+
+    std.debug.print("[D] Starting to decompress\n", .{});
+    _ = try std.fs.cwd().createFile(output_filename, .{});
+    var output_file = try std.fs.cwd().openFile(output_filename, .{ .mode = .write_only });
+    defer input_file.close();
+    defer output_file.close();
+    const input_file_size = (try input_file.metadata()).size();
+    var seed: [32]u8 = undefined;
+    _ = try input_file.read(seed[0..32]);
+    std.debug.print("[D] seed {any}\n", .{seed});
+    var control_bitstream_len_buffer: [64]u8 = undefined;
+    var table: []u8 = try allocator.alloc(u8, table_size);
+    initRandomTable(seed, table[0..].ptr, table_size);
+    var bitstream = try BitStream().init(allocator);
+    var end_ptr: usize = 0;
+    while (true) {
+        _ = try input_file.read(control_bitstream_len_buffer[end_ptr .. end_ptr + 1]);
+        try bitstream.pushFixedSize(control_bitstream_len_buffer[end_ptr]);
+        if (control_bitstream_len_buffer[end_ptr] & 1 == 1) {
+            break;
+        }
+        end_ptr += 1;
+    }
+
+    std.debug.print("[D] read the length\n", .{});
+    var control_bitstream_len: usize = 0;
+    var initial_bitstream_pos: usize = 0;
+    try bitstream.readULEB128(&control_bitstream_len, &initial_bitstream_pos);
+    var control_bitstream_buffer: []u8 = try allocator.alloc(u8, control_bitstream_len);
+    _ = try input_file.read(control_bitstream_buffer[0..control_bitstream_len]);
+    var control_bitstream = try BitStream().initFromOwnedSlice(allocator, control_bitstream_buffer);
+    var bitstream_pos: usize = 0;
+    var file_pos: usize = end_ptr + 32;
+    var litteral_run_buffer = try allocator.alloc(u8, 512);
+    std.debug.print("[D] Prereq init, control bitstream len: {d}\n", .{control_bitstream_len});
+    for (0..control_bitstream_len) |_| {
+        var sequence_len: u4 = 0;
+        var litteral_run_offset: usize = 0;
+        var table_index: usize = 0;
+        try control_bitstream.readFixedSize(&sequence_len, &bitstream_pos);
+        try control_bitstream.readULEB128(&litteral_run_offset, &bitstream_pos);
+        try control_bitstream.readULEB128(&table_index, &bitstream_pos);
+        litteral_run_buffer = try allocator.realloc(litteral_run_buffer, litteral_run_offset);
+        _ = try input_file.read(litteral_run_buffer[0..litteral_run_offset]);
+        _ = try output_file.write(litteral_run_buffer[0..litteral_run_offset]);
+        _ = try output_file.write(table[table_index .. table_index + @as(usize, @intCast(sequence_len))]);
+        file_pos += litteral_run_offset;
+    }
+
+    litteral_run_buffer = try allocator.realloc(litteral_run_buffer, input_file_size - file_pos);
+    _ = try input_file.read(litteral_run_buffer[0 .. input_file_size - file_pos]);
+    _ = try output_file.write(litteral_run_buffer[0 .. input_file_size - file_pos]);
 }
 
 fn initRandomTable(seed: [32]u8, buf: [*]u8, size: usize) void {
@@ -315,5 +376,7 @@ fn initRandomTable(seed: [32]u8, buf: [*]u8, size: usize) void {
 }
 
 pub fn main() !void {
-    try attemptFileCompress("RandomData.bin");
+    const table_size = 1 << 16;
+    try compress("RandomData.bin", "RandomData.bin.rdf", table_size);
+    try decompress("RandomData.bin.rdf", "RandomDataDecoded.bin", table_size);
 }
