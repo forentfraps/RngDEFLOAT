@@ -20,7 +20,14 @@ const BitStreamError = error{
     NotEnoughBitsInStream,
     OutOfStreamRead,
 };
-
+fn reverseBits(val: anytype) @TypeOf(val) {
+    requireInt(@TypeOf(val));
+    var result: @TypeOf(val) = 0;
+    inline for (0..@bitSizeOf(@TypeOf(val))) |i| {
+        result |= ((val >> i) & 1) << (@bitSizeOf(@TypeOf(val)) - 1 - i);
+    }
+    return result;
+}
 pub fn BitStream() type {
     return struct {
         const Self = @This();
@@ -34,7 +41,7 @@ pub fn BitStream() type {
             return c;
         }
 
-        pub fn deinit(self: Self) void {
+        pub fn deinit(self: *Self) void {
             self.stream.deinit();
             self.byte_ptr = 0;
             self.bit_ptr = 0;
@@ -57,7 +64,7 @@ pub fn BitStream() type {
         }
 
         pub fn append(self: *Self, bit: u1) !void {
-            self.stream.items[self.byte_ptr] |= @as(u8, @intCast(bit)) << self.bit_ptr;
+            self.stream.items[self.byte_ptr] |= @as(u8, @intCast(bit)) << (self.bit_ptr);
             if (self.bit_ptr == 7) {
                 self.bit_ptr = 0;
                 try self.stream.append(0);
@@ -75,7 +82,7 @@ pub fn BitStream() type {
             } else if (byte_pos == self.byte_ptr and bit_pos > self.bit_ptr) {
                 return BitStreamError.OutOfStreamRead;
             }
-            return @as(u1, @intCast((self.stream.items[byte_pos] & ((@as(u8, 1) << bit_pos)) >> bit_pos)));
+            return @as(u1, @intCast(((self.stream.items[byte_pos] & (@as(u8, 1) << (bit_pos))) >> (bit_pos))));
         }
 
         pub fn pushFixedSize(self: *Self, number: anytype) !void {
@@ -93,7 +100,7 @@ pub fn BitStream() type {
             requireInt(@TypeOf(number.*));
             const size = @bitSizeOf(@TypeOf(number.*));
             const stream_len = self.byte_ptr * 8 + self.bit_ptr;
-            std.debug.print("pos: {d} stream_len: {d} \n", .{
+            std.debug.print("pos: {d} stream_len in bits: {d} \n", .{
                 pos.*,
                 stream_len,
             });
@@ -102,9 +109,11 @@ pub fn BitStream() type {
             inline for (0..size) |i| {
                 const fetched_bit = try self.get(pos.* + i);
                 std.debug.print("fetched bit: {d} i {d}\n", .{ fetched_bit, i });
-                number.* = (number.*) | (@as(@TypeOf(number.*), @intCast(fetched_bit)) << i);
+                number.* = (number.*) | (@as(@TypeOf(number.*), @intCast(fetched_bit)) << (i));
             }
+            // number.* = reverseBits(number.*);
             std.debug.print("read number: {x} \n", .{number.*});
+
             pos.* += size;
         }
         pub fn pushULEB128(self: *Self, number: anytype) !void {
@@ -112,28 +121,32 @@ pub fn BitStream() type {
             var local_number = number;
             var pusher: u8 = 0;
             while (local_number > (0xff >> 1)) {
-                pusher = @as(u8, @intCast((local_number & (0xff >> 1)) << 1));
+                pusher = @as(u8, @intCast((local_number & (0xff >> 1))));
                 try self.pushFixedSize(pusher);
                 local_number >>= 7;
             }
-            pusher = @as(u8, @intCast(((local_number & (0xff >> 1)) << 1) + 1));
+            pusher = @as(u8, @intCast(((local_number & (0xff >> 1))) | (1 << 7)));
             try self.pushFixedSize(pusher);
         }
 
         pub fn readULEB128(self: Self, number: *usize, pos: *usize) !void {
             number.* = 0;
             var cur_pos: usize = pos.*;
-            const stream_len = self.stream.items.len;
+            // const stream_len = self.stream.items.len;
             var pusher: u8 = 0;
             var last_octet: bool = false;
-            while (cur_pos < stream_len and (cur_pos - pos.*) <= (@sizeOf(usize) * 8)) {
+            while (true) {
                 try self.readFixedSize(&pusher, &cur_pos);
-                last_octet = (pusher & 1) == 1;
-                pusher >>= 1;
-                const shift_value: u6 = @intCast(7 * ((cur_pos - pos.*) / 8));
+                last_octet = (pusher >> 7) == 1;
+                std.debug.print("pusher prior to touching {d}\n", .{pusher});
+                pusher = pusher & (0xff >> 1);
+                std.debug.print("pusher {d} last {}\n", .{ pusher, last_octet });
+
+                const shift_value: u6 = @intCast(7 * ((cur_pos - pos.* - 8) / 8));
                 number.* |= (@as(usize, @intCast(pusher)) << shift_value);
                 if (last_octet) {
                     pos.* = cur_pos;
+                    number.* = number.*;
                     return;
                 }
             }

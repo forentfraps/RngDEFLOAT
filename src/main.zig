@@ -137,7 +137,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             }
         }
 
-        pub fn match_seq_range(self: *@This(), seq_range: []const u8, file_offset: usize) !void {
+        pub fn match_seq_range(self: *@This(), seq_range: []const u8, _: usize) !void {
             // Attempts to match a given range to a built trie
 
             var i: usize = 0;
@@ -145,10 +145,10 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                 const local_seq = seq_range[i .. self.sequence_len + i];
                 var table_index: usize = 0;
                 const found_seq_len = self.check_seq(local_seq, self.root_node, 0, &table_index);
-                if (found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(file_offset + i)) / 8) {
+                if (found_seq_len > (ULEB128_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index)) / 8) {
                     try @constCast(self.encrypted_entry_list).append(.{
                         .file_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[0].type, @intCast(self.global_block_counter)),
-                        .table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(file_offset + i)),
+                        .table_index = @as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index)),
                         .sequence_len = @as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)),
                     });
                     self.compressed_len -= found_seq_len;
@@ -158,7 +158,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                     //self.control_bitstream_len += 3 + ULEB64_bitsize(self.global_block_counter) + ULEB128_bitsize(table_index);
                     try self.bitstream.pushFixedSize(@as(@typeInfo(EncryptEntry_type).@"struct".fields[2].type, @intCast(found_seq_len)));
                     try self.bitstream.pushULEB128(self.global_block_counter);
-                    try self.bitstream.pushULEB128(@as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(file_offset + i)));
+                    try self.bitstream.pushULEB128(@as(@typeInfo(EncryptEntry_type).@"struct".fields[1].type, @intCast(table_index)));
 
                     self.global_block_counter = 0;
                     i += found_seq_len;
@@ -213,7 +213,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
                     self.max_length_sequence,
                 });
             }
-            return saved_bitstream_bytes >= 3;
+            return saved_bitstream_bytes >= 0;
         }
 
         pub fn calc_efficiency(self: @This()) isize {
@@ -236,12 +236,13 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
             // seed
             _ = try output_file.write(seed[0..32]);
             var tmp_bitstream = try BitStream().init(std.heap.page_allocator);
-            try tmp_bitstream.pushULEB128(self.bitstream.byte_ptr);
+            defer tmp_bitstream.deinit();
+            try tmp_bitstream.pushULEB128(self.bitstream.stream.items.len);
             // size of control bitstream
-            _ = try output_file.write(tmp_bitstream.stream.items[0..(ULEB128_bitsize(self.bitstream.byte_ptr) / 8)]);
+            _ = try output_file.write(tmp_bitstream.stream.items[0..tmp_bitstream.stream.items.len]);
 
             // control bitstream
-            _ = try output_file.write(self.bitstream.stream.items[0..self.bitstream.byte_ptr]);
+            _ = try output_file.write(self.bitstream.stream.items[0..self.bitstream.stream.items.len]);
 
             //literal run
             var file_ptr: usize = 0;
@@ -266,7 +267,7 @@ pub fn LookupPrefixTree(comptime EncryptEntry_type: type, comptime TrieNode: typ
 fn compress(filename: []const u8, output_filename: []const u8, table_size: usize) !void {
     const sequence_len = 8;
     const header_size = 32;
-    const EncryptEntry_type: type = EncryptEntryFactory.custom(u20, u16, u4);
+    const EncryptEntry_type: type = EncryptEntryFactory.custom(u16, u20, u4);
 
     var input_file = try std.fs.cwd().openFile(filename, .{});
     const size = (try input_file.metadata()).size();
@@ -302,6 +303,16 @@ fn compress(filename: []const u8, output_filename: []const u8, table_size: usize
         if (valid_seed) {
             std.debug.print("VALID SEED FOUND!!!\n", .{});
             std.debug.print("[SEED] {any}\n", .{seed});
+            for (LPT.encrypted_entry_list.items) |entry| {
+                std.debug.print(
+                    "file offset {d} table_index {d} len {d}\n",
+                    .{
+                        entry.file_index,
+                        entry.table_index,
+                        entry.sequence_len,
+                    },
+                );
+            }
 
             try LPT.writeCompressed(buffer, size, seed, output_filename);
             return;
@@ -333,7 +344,7 @@ pub fn decompress(filename: []const u8, output_filename: []const u8, table_size:
     while (true) {
         _ = try input_file.read(control_bitstream_len_buffer[end_ptr .. end_ptr + 1]);
         try bitstream.pushFixedSize(control_bitstream_len_buffer[end_ptr]);
-        if (control_bitstream_len_buffer[end_ptr] & 1 == 1) {
+        if (control_bitstream_len_buffer[end_ptr] & (1 << 7) == 1 << 7) {
             break;
         }
         end_ptr += 1;
@@ -350,18 +361,30 @@ pub fn decompress(filename: []const u8, output_filename: []const u8, table_size:
     var file_pos: usize = end_ptr + 32;
     var litteral_run_buffer = try allocator.alloc(u8, 512);
     std.debug.print("[D] Prereq init, control bitstream len: {d}\n", .{control_bitstream_len});
-    for (0..control_bitstream_len) |_| {
+    for (0..control_bitstream_len * 2 / 5) |i| {
+        std.debug.print("[D] deciphering {d} control entry\n", .{i});
         var sequence_len: u4 = 0;
         var litteral_run_offset: usize = 0;
         var table_index: usize = 0;
         try control_bitstream.readFixedSize(&sequence_len, &bitstream_pos);
+        std.debug.print("pos after first read {d}\n", .{bitstream_pos});
         try control_bitstream.readULEB128(&litteral_run_offset, &bitstream_pos);
+
+        std.debug.print("pos after second read {d}\n", .{bitstream_pos});
         try control_bitstream.readULEB128(&table_index, &bitstream_pos);
         litteral_run_buffer = try allocator.realloc(litteral_run_buffer, litteral_run_offset);
         _ = try input_file.read(litteral_run_buffer[0..litteral_run_offset]);
         _ = try output_file.write(litteral_run_buffer[0..litteral_run_offset]);
         _ = try output_file.write(table[table_index .. table_index + @as(usize, @intCast(sequence_len))]);
         file_pos += litteral_run_offset;
+        std.debug.print(
+            "file offset {d} table_index {d} sequence_len {d}\n",
+            .{
+                litteral_run_offset,
+                table_index,
+                sequence_len,
+            },
+        );
     }
 
     litteral_run_buffer = try allocator.realloc(litteral_run_buffer, input_file_size - file_pos);
